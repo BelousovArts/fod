@@ -29,8 +29,9 @@ PointCloud2). Колбэк только кладёт сообщение в яч�
 Параметры: `topic`, `device` (cuda / cpu), `markers` (публиковать маркеры),
 `best_effort` (подписка BEST_EFFORT — для драйвера, который публикует только так);
 установка лидара (`fod/mount.py`): `forward` (`-y`, `+x`, …), `up` (`+z` / `-z`),
-`rpy` (поправки крен, тангаж, рыскание, градусы). Координаты в `/fod/status` —
-тоже в системе облака.
+`rpy` (поправки крен, тангаж, рыскание, градусы); `detector_config` — путь к
+`config/detector.yaml` (габарит, вырез между рельсами, пороги). Координаты в
+`/fod/status` — тоже в системе облака.
 """
 
 from __future__ import annotations
@@ -82,6 +83,7 @@ class FodNode(Node):
         self.declare_parameter("forward", "-y")
         self.declare_parameter("up", "+z")
         self.declare_parameter("rpy", [0.0, 0.0, 0.0])
+        self.declare_parameter("detector_config", "")
         self.topic = str(self.get_parameter("topic").value)
         self.markers = bool(self.get_parameter("markers").value)
         self.best_effort = bool(self.get_parameter("best_effort").value)
@@ -101,9 +103,12 @@ class FodNode(Node):
         self.stats = {"done": 0, "ms": [], "lat": []}
 
         self.get_logger().info(f"Установка лидара: {self.mount.describe()}. Загрузка сетей на {device}…")
+        from fod.obstacles import load_detector_config
         from fod.pipeline import Pipeline
 
-        self.pipeline = Pipeline(device=device, mount=self.mount)
+        cfg_path = str(self.get_parameter("detector_config").value)
+        self.pipeline = Pipeline(device=device, mount=self.mount,
+                                 obstacle_config=load_detector_config(cfg_path or None))
         self.worker = threading.Thread(target=self._work, name="fod", daemon=True)
         self.worker.start()
         if self.topic:
@@ -200,14 +205,27 @@ class FodNode(Node):
 
         color = COLORS.get(tel.level, COLORS["UNKNOWN"])
         if res.axis_n.size and res.reach > 0.0:
+            from fod.obstacles import gauge_floor
+
+            cfg = self.pipeline.detector.cfg
             keep = res.axis_s <= res.reach
             s, n = res.axis_s[keep], res.axis_n[keep]
             z = res.axis_z[keep] if res.axis_z.size else np.full(s.size, -1.2)
-            for mid, off, ns in ((0, 0.0, "axis"), (1, -res.half_width, "gauge"), (2, res.half_width, "gauge")):
+            w = cfg.half_width
+            strips = [(0, np.stack([n, -s, z], axis=1), "axis", 0.05)]
+            for off, dz in ((-w, cfg.floor_u), (w, cfg.floor_u), (-w, cfg.height_max), (w, cfg.height_max),
+                            (-cfg.notch_half, cfg.notch_top), (cfg.notch_half, cfg.notch_top)):
+                strips.append((len(strips), np.stack([n + off, -s, z + dz], axis=1), "gauge", 0.06))
+            n_rel = np.linspace(-w, w, 21)
+            floor = gauge_floor(cfg, n_rel)
+            for k in range(0, s.size, 20):
+                strips.append((len(strips), np.stack([n[k] + n_rel, np.full_like(n_rel, -s[k]), z[k] + floor], axis=1),
+                               "gauge", 0.04))
+            for mid, xyz, ns, width in strips:
                 m = marker(mid, Marker.LINE_STRIP, ns)
-                m.scale.x = 0.05 if mid == 0 else 0.08
+                m.scale.x = width
                 m.color = color
-                m.points = self._points(np.stack([n + off, -s, z], axis=1))
+                m.points = self._points(xyz)
                 out.markers.append(m)
         boxes = [(o, "obstacles", COLORS["OBSTACLE"], "") for o in res.obstacles]
         boxes += [(o, "suspects", COLORS["ATTENTION"], "?") for o in res.suspects]

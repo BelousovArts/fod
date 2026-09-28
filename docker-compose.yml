@@ -22,6 +22,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
       - ./config/train.yaml:/fod/config/train.yaml:ro
+      - ./config/detector.yaml:/fod/config/detector.yaml:ro
     command: ["python3", "-m", "fod_ros.node", "--ros-args", "--params-file", "/fod/config/train.yaml"]
     gpus: all
     logging:

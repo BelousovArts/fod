@@ -33,7 +33,8 @@ fi
 command -v xhost > /dev/null && xhost +local: > /dev/null 2>&1 || true
 RUN=(docker run --rm --gpus all -u "$(id -u):$(id -g)"
      -e DISPLAY -e QT_X11_NO_MITSHM=1 -v /tmp/.X11-unix:/tmp/.X11-unix
-     -v "$HERE/config/train.yaml:/fod/config/train.yaml:ro")
+     -v "$HERE/config/train.yaml:/fod/config/train.yaml:ro" \
+     -v "$HERE/config/detector.yaml:/fod/config/detector.yaml:ro")
 [ -t 0 ] && RUN+=(-it)
 [ -d /mnt/wslg ] && RUN+=(-v /mnt/wslg:/mnt/wslg -e WAYLAND_DISPLAY -e XDG_RUNTIME_DIR -e PULSE_SERVER)
 if [ -n "$BAG" ]; then

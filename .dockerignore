@@ -6,6 +6,7 @@
 !models/
 !config/fod.rviz
 !config/train.yaml
+!config/detector.yaml
 !config/stand_example.yaml
 !scripts/obstacle_bench.py
 !scripts/make_video.py

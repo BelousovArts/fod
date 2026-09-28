@@ -7,17 +7,21 @@
    так уклон и перелом профиля не дают ложной «ступеньки»).
 2. Нормальный поперечный профиль полотна `u_norm(n)` — верхняя огибающая (p90)
    ближней зоны 4…25 м, медиана по последним кадрам. Рельсы, шпалы, лоток
-   попадают в норму сами, без шаблона.
-3. Кандидат — точка в габарите выше нормы на `margin`. Кандидаты склеиваются
-   в ячейках `(s, n)`, ячейка вдоль пути растёт с дальностью.
+   попадают в норму сами, без шаблона. Дно габарита одно и то же на всех
+   дальностях: ниже головок у рельсов и по краям, между рельсами — вырез
+   (`gauge_floor`), чтобы таблички на полотне не были кандидатами.
+3. Кандидат — точка в габарите, выше дна и выше нормы на порог, растущий с дальностью. Кандидаты
+   склеиваются в ячейках `(s, n)`, ячейка вдоль пути растёт с дальностью.
 4. Подтверждение — кластер держится в одном месте пути: положение хранится в
    абсолютной путевой координате `S = s_одометрии + s`, объект неподвижен, поезд едет.
 """
 
 from __future__ import annotations
 
+import os
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
+from pathlib import Path
 
 import numpy as np
 from scipy import ndimage
@@ -29,23 +33,32 @@ from fod.cloud import MIN_RANGE
 class ObstacleConfig:
     s_min: float = 4.0
     s_max: float = 60.0
-    # Габарит поезда 2.1 × 3.0 м.
+    # Габарит поезда 2.1 × 3.0 м. Дно — ниже головок, одно и то же на всех дальностях
+    # (раньше дальше 30 м дно поднималось до головок, и низкие предметы пропадали).
     half_width: float = 1.05
     height_max: float = 3.00
-    # Дальше этого ошибка оси по n сравнима с расстоянием между рельсом и лотком:
-    # кандидат должен быть выше головок рельсов, иначе головка сама «препятствие».
-    rail_level_s: float = 30.0
-    # Выше нормы полотна на `margin + margin_per_m * s` — кандидат: ошибка
-    # подгонки головок и шум дальности растут с расстоянием.
+    floor_u: float = -0.10
+    # Вырез между рельсами, профиль дна от оси к краю: плато `notch_top`, скос
+    # `notch_ramp`, дальше `floor_u`. Рельс (~0.76 м от оси) уже на полном дне,
+    # поэтому предмет на рельсе виден, а табличка по центру полотна — нет.
+    notch_half: float = 0.50
+    notch_ramp: float = 0.22
+    notch_top: float = 0.06
+    # Поднять дно до головок дальше этой дальности. Больше `s_max` — не поднимать.
+    rail_level_s: float = 1.0e9
+    # Выше нормы полотна на `margin + margin_per_m * s` до `margin_knee`,
+    # дальше наклон `margin_far_per_m`: ошибка нормы растёт с дальностью.
+    # Пологий участок держит предмет 13 см на рельсе (56 м), крутой срезает
+    # ложные 25–30 см дальше 70 м, не трогая этот предмет.
     margin: float = 0.06
-    margin_per_m: float = 0.002
-    # Между рельсами порог выше на столько: там почти все ложные (шпалы, крепления, мусор на полотне).
-    # Цена: объект ниже 10 см между рельсами не виден (0.05 — ложных в 1.3 раза больше, «min» на 20 м).
-    inner_raise: float = 0.10
+    margin_per_m: float = 0.001
+    margin_knee: float = 60.0
+    margin_far_per_m: float = 0.008
+    # Прежняя надбавка между рельсами. Вырез её заменяет; оставлено, чтобы вернуть из конфига.
+    inner_raise: float = 0.0
     inner_half: float = 0.85
-    # Между рельсами верх кандидата не ниже головок на столько (на всех дальностях): ниже
-    # головок предмет под поездом проходит. Таблички по центру пути — верх на 5 см ниже головок.
-    inner_top: float = -0.03
+    # Между рельсами верх кандидата не ниже головок на столько. Большой минус — не проверять.
+    inner_top: float = -10.0
     # Дальше `far_s` ошибка оси 5…20 см: края габарита задевают стены, короб КР и свод.
     # Для детекции габарит сужается и опускается на столько за метр: на 120 м ±0.69 × 2.1 м, на 150 м ±0.51 × 1.65 м.
     far_s: float = 60.0
@@ -103,6 +116,63 @@ class ObstacleConfig:
     temporal_k: int = 1
     temporal_min_frames: int = 2
     temporal_need_now: bool = True
+
+
+def gauge_floor(cfg: ObstacleConfig, n_rel: np.ndarray | float) -> np.ndarray:
+    """Дно габарита над головками рельсов: вырез между рельсами, ниже — у рельсов и по краям.
+
+    `n_rel` — поперёк оси, м. Форма `_/--\\_`: от оси плато `notch_top`, затем скос к `floor_u`.
+    """
+    a = np.abs(np.asarray(n_rel, dtype=np.float64))
+    if cfg.notch_ramp <= 0.0:
+        return np.where(a <= cfg.notch_half, cfg.notch_top, cfg.floor_u)
+    t = np.clip((a - cfg.notch_half) / cfg.notch_ramp, 0.0, 1.0)
+    return cfg.notch_top + (cfg.floor_u - cfg.notch_top) * t
+
+
+def load_detector_config(path: str | Path | None = None) -> ObstacleConfig:
+    """Параметры из `config/detector.yaml` (или `FOD_DETECTOR_CONFIG`). Нет файла — значения класса, `s_max` = 150."""
+    cfg = replace(ObstacleConfig(), s_max=150.0)
+    if path is not None and not str(path).strip():
+        path = None
+    file = Path(path) if path else Path(os.environ.get("FOD_DETECTOR_CONFIG", "")) if os.environ.get("FOD_DETECTOR_CONFIG") else None
+    if file is None:
+        file = Path(__file__).resolve().parents[1] / "config" / "detector.yaml"
+    if not file.is_file():
+        return cfg
+    import yaml
+
+    raw = yaml.safe_load(file.read_text(encoding="utf-8")) or {}
+    gauge = raw.get("gauge") or {}
+    notch = gauge.get("notch") or {}
+    flat: dict = {}
+    for key, value in (
+        ("half_width", gauge.get("half_width")),
+        ("height_max", gauge.get("height")),
+        ("floor_u", gauge.get("floor")),
+        ("notch_half", notch.get("half_width")),
+        ("notch_ramp", notch.get("ramp")),
+        ("notch_top", notch.get("top")),
+    ):
+        if value is not None:
+            flat[key] = value
+    flat.update(raw.get("detector") or {})
+    known = {f.name: f.type for f in fields(ObstacleConfig)}
+    unknown = sorted(k for k in flat if k not in known)
+    if unknown:
+        raise ValueError(f"{file}: неизвестные параметры: {', '.join(unknown)}")
+    cast = {}
+    for key, value in flat.items():
+        if isinstance(value, str):
+            value = yaml.safe_load(value)
+        kind = known[key]
+        if kind is int or (isinstance(kind, str) and kind == "int"):
+            cast[key] = int(value)
+        elif kind is float or (isinstance(kind, str) and kind == "float"):
+            cast[key] = float(value)
+        else:
+            cast[key] = value
+    return replace(cfg, **cast)
 
 
 @dataclass
@@ -255,7 +325,9 @@ class ObstacleDetector:
         k = np.round((c.profile_dilate + c.profile_dilate_per_m * s) / c.profile_bin).astype(np.int64)
         k = np.clip(k, 0, self._dilated.shape[0] - 1)
         base = self._dilated[k, self._bin(n_rel)]
-        return np.where(s > c.rail_level_s, np.maximum(base, 0.0), base)
+        if c.rail_level_s < c.s_max:
+            base = np.where(s > c.rail_level_s, np.maximum(base, 0.0), base)
+        return base
 
     def _s_cell(self, s: np.ndarray) -> np.ndarray:
         c = self.cfg
@@ -316,7 +388,7 @@ class ObstacleDetector:
         if not self.frozen:
             self._update_profile(s, n_rel, u)
         beyond = np.maximum(s - c.far_s, 0.0)
-        core = (np.abs(n_rel) < c.half_width - c.far_shrink_n * beyond) & (u < c.height_max - c.far_shrink_h * beyond)
+        core = self._in_gauge(s, n_rel, u)
         s, n_rel, u, z = s[core], n_rel[core], u[core], z[core]
         ready = len(self._profile_rows) >= c.profile_min_frames and self._dilated is not None
         candidates: list[Candidate] = []
@@ -362,9 +434,20 @@ class ObstacleDetector:
             s_max=s_hi,
         )
 
+    def _in_gauge(self, s: np.ndarray, n_rel: np.ndarray, u: np.ndarray) -> np.ndarray:
+        """Внутри габарита: ширина и верх сужаются вдали, дно — форма `gauge_floor` на любой дальности."""
+        c = self.cfg
+        beyond = np.maximum(s - c.far_s, 0.0)
+        wide = np.abs(n_rel) < c.half_width - c.far_shrink_n * beyond
+        return wide & (u > gauge_floor(c, n_rel)) & (u < c.height_max - c.far_shrink_h * beyond)
+
     def _margin(self, s: np.ndarray, n_rel: np.ndarray) -> np.ndarray:
         c = self.cfg
-        return c.margin + c.margin_per_m * s + np.where(np.abs(n_rel) < c.inner_half, c.inner_raise, 0.0)
+        near = np.minimum(s, c.margin_knee)
+        far = np.maximum(s - c.margin_knee, 0.0)
+        return c.margin + c.margin_per_m * near + c.margin_far_per_m * far + np.where(
+            np.abs(n_rel) < c.inner_half, c.inner_raise, 0.0
+        )
 
     def _above_inner(self, n_rel: np.ndarray, u: np.ndarray) -> np.ndarray:
         return (np.abs(n_rel) >= self.cfg.inner_half) | (u > self.cfg.inner_top)
@@ -410,8 +493,7 @@ class ObstacleDetector:
         s_e, n_e, z_e, a_e = s_e[keep], n_e[keep], z_e[keep], a_e[keep]
         n_rel_e = self._n_rel(s_e, n_e, s_axis, n_axis, slope)
         u_e = z_e - head(s_e) if s_e.size else s_e
-        beyond = np.maximum(s_e - c.far_s, 0.0)
-        core = (np.abs(n_rel_e) < c.half_width - c.far_shrink_n * beyond) & (u_e < c.height_max - c.far_shrink_h * beyond)
+        core = self._in_gauge(s_e, n_rel_e, u_e) if s_e.size else np.zeros(0, dtype=bool)
         s_e, n_e, n_rel_e, u_e, z_e, a_e = s_e[core], n_e[core], n_rel_e[core], u_e[core], z_e[core], a_e[core]
         if s_e.size == 0:
             return s, n_rel, excess, n_abs, z, now_age

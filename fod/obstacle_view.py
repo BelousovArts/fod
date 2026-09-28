@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from fod.cloud import MIN_RANGE
+from fod.obstacles import gauge_floor
 from fod.colormaps import colorize_intensity
 from fod.rail_template_view import rail_tracks
 from fod.rails_view import project_to_image
@@ -124,11 +125,15 @@ def _front(front, rail, det, axis, head, detector, obj, cr, s_gauge) -> np.ndarr
         n = axis(s)
         z0 = head(s)
         for side in (-cfg.half_width, cfg.half_width):
-            for z in (z0, z0 + cfg.height_max):
-                poly(np.stack([n + side, -s, z], axis=1), COL_GAUGE, 1)
-        for sv in (s_gauge,):
-            for z in (z0[-1], z0[-1] + cfg.height_max):
-                poly(np.array([[n[-1] - cfg.half_width, -sv, z], [n[-1] + cfg.half_width, -sv, z]]), COL_GAUGE, 1)
+            poly(np.stack([n + side, -s, z0 + cfg.floor_u], axis=1), COL_GAUGE, 1)
+            poly(np.stack([n + side, -s, z0 + cfg.height_max], axis=1), COL_GAUGE, 1)
+        for side in (-cfg.notch_half, cfg.notch_half):
+            poly(np.stack([n + side, -s, z0 + cfg.notch_top], axis=1), COL_GAUGE, 1)
+        n_rel = np.linspace(-cfg.half_width, cfg.half_width, 41)
+        floor = gauge_floor(cfg, n_rel)
+        poly(np.stack([n[-1] + n_rel, np.full_like(n_rel, -s_gauge), z0[-1] + floor], axis=1), COL_GAUGE, 1)
+        poly(np.array([[n[-1] - cfg.half_width, -s_gauge, z0[-1] + cfg.height_max],
+                       [n[-1] + cfg.half_width, -s_gauge, z0[-1] + cfg.height_max]]), COL_GAUGE, 1)
     if det.cand_s.size:
         cols, rows = proj(np.stack([det.cand_n, -det.cand_s, det.cand_z], axis=1))
         for c, r in zip(cols, rows):
@@ -159,7 +164,7 @@ def _front(front, rail, det, axis, head, detector, obj, cr, s_gauge) -> np.ndarr
     _put(vis, "FRONT VIEW: lidar range image, colour = return intensity", (8, 16), 0.42, COL_TEXT)
     x = 8
     for text, color in (("running rails", COL_RAIL), ("contact (third) rail", COL_CR),
-                        ("clearance gauge 2.1 x 3.0 m", COL_GAUGE)):
+                        ("gauge 2.1 x 3.0 m, notch between rails", COL_GAUGE)):
         cv2.line(vis, (x, 30), (x + 18, 30), color, 2)
         _put(vis, text, (x + 24, 34), 0.42, color)
         x += 34 + int(cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)[0][0])
@@ -223,7 +228,7 @@ def _bev(xyz, intensity, rail, det, axis, head, detector, obj, cr, s_gauge) -> n
         ng = np.asarray(axis(sg), dtype=np.float64)
         # Габарит перпендикулярно оси, а не вдоль n: на кривой иначе сужается.
         th = np.arctan(np.gradient(ng, sg))
-        for side in (-cfg.half_width, cfg.half_width):
+        for side in (-cfg.half_width, cfg.half_width, -cfg.notch_half, cfg.notch_half):
             line(sg - side * np.sin(th), ng + side * np.cos(th), COL_GAUGE, 1)
         for i in range(0, len(sg) - 1, 4):
             line(sg[i : i + 2], ng[i : i + 2], COL_AXIS, 1)
@@ -266,7 +271,7 @@ def _bev(xyz, intensity, rail, det, axis, head, detector, obj, cr, s_gauge) -> n
 LEGEND = (
     ("line", COL_RAIL, "running rails (found by the detector)"),
     ("line", COL_CR, "contact (third) rail"),
-    ("line", COL_GAUGE, "clearance gauge: 2.1 m wide, 3.0 m high - space the train needs"),
+    ("line", COL_GAUGE, "clearance gauge 2.1 x 3.0 m; inner lines - floor raised between the rails"),
     ("dash", COL_AXIS, "track centreline"),
     ("dot", COL_CAND, "candidate points: above the normal track bed, inside the gauge"),
     ("box", COL_SUSPECT, "suspect: seen, not confirmed yet"),
@@ -277,7 +282,7 @@ LEGEND = (
 def _legend(img, h: int, with_object: bool) -> None:
     rows = LEGEND + ((("circle", COL_OBJECT, "test object inserted by the stand"),) if with_object else ())
     x0, y = 40, h - 24 - 20 * len(rows)
-    cv2.rectangle(img, (x0 - 10, y - 18), (x0 + 520, h - 26), (28, 28, 28), -1)
+    cv2.rectangle(img, (x0 - 10, y - 18), (x0 + 700, h - 26), (28, 28, 28), -1)
     for kind, color, text in rows:
         c = (x0 + 10, y - 4)
         if kind == "line":

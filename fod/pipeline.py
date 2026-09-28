@@ -103,14 +103,14 @@ class Pipeline:
         from fod.mount import Mount
         from fod.far_bev import FarAxis
         from fod.lidar_odometry import GicpOdometry
-        from fod.obstacles import ObstacleConfig
+        from fod.obstacles import load_detector_config
         from fod.rail_seg_detect import SegRailDetector
 
         self.device = device
         self.keep_view = keep_view
         self.injector = injector
         self.mount = mount or Mount()
-        self.obstacle_cfg = obstacle_config or replace(ObstacleConfig(), s_max=S_MAX)
+        self.obstacle_cfg = obstacle_config if obstacle_config is not None else load_detector_config()
         self.cr_cfg = ContactRailConfig()
         self.rails = SegRailDetector(device=device)
         self.far = FarAxis(device=device)

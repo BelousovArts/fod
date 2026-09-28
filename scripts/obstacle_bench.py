@@ -577,9 +577,9 @@ def evaluate(job: Job, frames, cfg, writer=None) -> dict:
 
 def run_job(task: tuple) -> dict:
     job, overrides, mode = task
-    from fod.obstacles import ObstacleConfig
+    from fod.obstacles import load_detector_config
 
-    cfg = replace(ObstacleConfig(), **overrides)
+    cfg = replace(load_detector_config(), **overrides)
     path = CACHE_DIR / f"{job.name}.pkl"
     if mode == "replay":
         with path.open("rb") as fh:

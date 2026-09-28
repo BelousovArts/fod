@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Прогон записи в rerun: 3D, range image, вид сверху и показатели по времени.
+"""Прогон записи в rerun: 3D, карта аномальности, вид сверху и показатели по времени.
 
 - `train` — 3D в системе поезда (лидар в начале координат, вперёд — −y): облако в коридоре
   пути, путевые и контактный рельсы, габарит, ось, препятствия и подозрения, кузов поезда.
@@ -8,7 +8,7 @@
   глазком в левой панели rerun. Подписей в 3D нет — названия слоёв в той же панели;
 - `world` — карта, которая копится по ходу (прореженная), траектория и препятствия в мире;
 - `views/front` — передний сектор развёртки с габаритом и рельсами (как в видео),
-  `views/range` — дальность на 360°, `views/top` — вид сверху до 150 м;
+  `views/anomaly` — высота над нормой полотна внутри габарита, `views/top` — вид сверху до 150 м;
 - `metrics/*` — скорость и рекомендуемая, до куда проверен габарит, тормозной путь,
   расстояние до препятствия и подозрения; `log` — смена уровня.
 
@@ -74,7 +74,7 @@ def blueprint(colors: list[str]):
             ),
             rrb.Vertical(
                 rrb.Spatial2DView(origin="views/front", name="Front view (range image)"),
-                rrb.Spatial2DView(origin="views/range", name="Range, 360 deg"),
+                rrb.Spatial2DView(origin="views/anomaly", name="Anomaly, inside gauge"),
                 rrb.Spatial2DView(origin="views/top", name="Top view"),
                 rrb.TimeSeriesView(origin="metrics/speed", name="Speed, km/h"),
                 rrb.TimeSeriesView(origin="metrics/distance", name="Distances, m"),
@@ -145,7 +145,9 @@ def point_colors(mode: str, pts: np.ndarray, inten: np.ndarray, res, head_z, cfg
         from fod.pipeline import AXIS_GRID
 
         n_rel = pts[:, 0] - np.interp(s, AXIS_GRID, res.axis_n)
-        inside = (np.abs(n_rel) < res.half_width) & (u > 0.05) & (u < cfg.height_max) & (s < res.reach)
+        from fod.obstacles import gauge_floor
+
+        inside = (np.abs(n_rel) < res.half_width) & (u > gauge_floor(cfg, n_rel)) & (u < cfg.height_max) & (s < res.reach)
     out = np.tile(np.array([[70, 80, 100]], np.uint8), (s.size, 1))
     out[inside] = (255, 255, 255)
     return out
@@ -178,21 +180,78 @@ def track_lines(res, rail, cr_frame, head_z) -> tuple[list, list]:
     return rails, contact
 
 
-def gauge_lines(res, height: float) -> tuple[list, np.ndarray | None]:
-    """Рёбра габарита (низ и верх с обеих сторон, поперечины через 10 м) и ось пути."""
+def gauge_lines(res, cfg) -> tuple[list, np.ndarray | None]:
+    """Рёбра габарита и ось пути. Дно — ниже головок, между рельсами вырез; поперечины через 10 м."""
+    from fod.obstacles import gauge_floor
+
     keep = res.axis_s <= res.reach
     s, n = res.axis_s[keep], res.axis_n[keep]
     z = res.axis_z[keep] if res.axis_z.size else np.full(s.size, -1.2)
     if s.size < 2:
         return [], None
-    w = res.half_width
+    w, height = cfg.half_width, cfg.height_max
     edge = lambda off, dz: np.stack([n + off, -s, z + dz], axis=1)  # noqa: E731
-    lines = [edge(-w, 0.0), edge(w, 0.0), edge(-w, height), edge(w, height)]
+    lines = [edge(-w, cfg.floor_u), edge(w, cfg.floor_u), edge(-w, height), edge(w, height),
+             edge(-cfg.notch_half, cfg.notch_top), edge(cfg.notch_half, cfg.notch_top)]
+    n_rel = np.linspace(-w, w, 21)
+    floor = gauge_floor(cfg, n_rel)
     for k in range(0, s.size, 20):
-        a = np.array([[n[k] - w, -s[k], z[k]], [n[k] - w, -s[k], z[k] + height],
-                      [n[k] + w, -s[k], z[k] + height], [n[k] + w, -s[k], z[k]]])
-        lines.append(a)
+        lines.append(np.stack([n[k] + n_rel, np.full_like(n_rel, -s[k]), z[k] + floor], axis=1))
+        lines.append(np.array([[n[k] - w, -s[k], z[k] + height], [n[k] + w, -s[k], z[k] + height]]))
+        lines.append(np.array([[n[k] - w, -s[k], z[k] + cfg.floor_u], [n[k] - w, -s[k], z[k] + height]]))
+        lines.append(np.array([[n[k] + w, -s[k], z[k] + cfg.floor_u], [n[k] + w, -s[k], z[k] + height]]))
     return lines, edge(0.0, 0.0)
+
+
+def anomaly_image(res, cloud, detector) -> np.ndarray:
+    """Высота над нормой полотна, только внутри габарита. RGB, передний сектор.
+
+    Жёлтое — выпирает сильнее (шкала до 0,8 м). Тёмное — нет возврата, вне габарита
+    или норма полотна ещё не готова. Это третий вариант карты аномальности.
+    """
+    import cv2
+
+    from fod.pipeline import AXIS_GRID
+    from fod.range_image import build_range_image, crop_elevation, crop_forward_sector
+
+    img = crop_elevation(crop_forward_sector(build_range_image(cloud, interpolate=False), 60.0), -18.0, 8.0)
+    rng = img.range
+    height, width = rng.shape
+    dark = np.full((height, width, 3), 22, np.uint8)
+
+    def show(bgr: np.ndarray) -> np.ndarray:
+        rgb = cv2.resize(bgr, (width, height * 3), interpolation=cv2.INTER_NEAREST)
+        return np.ascontiguousarray(rgb[:, :, ::-1])
+
+    cfg = detector.cfg
+    ready = detector._dilated is not None and res.axis_n.size > 0 and res.axis_z.size > 0 and res.reach > cfg.s_min
+    if not ready:
+        return show(dark)
+    ok = np.isfinite(rng) & (rng > 1.0)
+    az = np.deg2rad(img.azimuth_deg)[None, :]
+    el = np.deg2rad(img.elevation_deg)[:, None]
+    x = rng * np.cos(el) * np.cos(az)
+    y = rng * np.cos(el) * np.sin(az)
+    z = rng * np.sin(el)
+    s = -y
+    s_axis = np.linspace(cfg.s_min, float(res.reach), 1 + int(np.ceil(res.reach - cfg.s_min)))
+    n_axis = np.interp(s_axis, AXIS_GRID, res.axis_n)
+    slope = np.gradient(n_axis, s_axis)
+    n_rel = (x - np.interp(s, s_axis, n_axis)) * np.cos(np.arctan(np.interp(s, s_axis, slope)))
+    u = z - np.interp(s, AXIS_GRID, res.axis_z)
+    finite = ok & np.isfinite(n_rel) & (s > cfg.s_min) & (s < res.reach)
+    inside = np.zeros(rng.shape, dtype=bool)
+    if np.any(finite):
+        inside[finite] = detector._in_gauge(s[finite], n_rel[finite], u[finite])
+    excess = np.full(rng.shape, np.nan)
+    if np.any(inside):
+        excess[inside] = u[inside] - detector._base(s[inside], n_rel[inside])
+    hot = inside & np.isfinite(excess) & (excess > 0.0)
+    tone = np.zeros(rng.shape, np.float32)
+    tone[hot] = np.clip(excess[hot] / 0.8, 0.0, 1.0)
+    bgr = cv2.applyColorMap((tone * 255).astype(np.uint8), cv2.COLORMAP_INFERNO)
+    bgr[~hot] = (22, 22, 24)
+    return show(bgr)
 
 
 def log_boxes(path: str, items, color) -> None:
@@ -242,7 +301,7 @@ def log_frame(res, tel, rng: np.random.Generator, args, state: dict) -> None:
             rr.log(f"train/{name}", rr.LineStrips3D(lines, colors=[color] * len(lines), radii=0.04))
         else:
             rr.log(f"train/{name}", rr.Clear(recursive=False))
-    gauge, centre = gauge_lines(res, detector.cfg.height_max) if res.axis_n.size and res.reach > 0 else ([], None)
+    gauge, centre = gauge_lines(res, detector.cfg) if res.axis_n.size and res.reach > 0 else ([], None)
     if gauge:
         rr.log("train/clearance_gauge", rr.LineStrips3D(gauge, colors=[pal["gauge"]] * len(gauge), radii=0.03))
         rr.log("train/centreline", rr.LineStrips3D([centre], colors=[pal["axis"]], radii=0.03))
@@ -285,12 +344,8 @@ def log_frame(res, tel, rng: np.random.Generator, args, state: dict) -> None:
     top = frame[TITLE_H + FRONT_H : -state["panel_h"], :, ::-1]
     rr.log("views/front", rr.Image(np.ascontiguousarray(front)).compress(jpeg_quality=85))
     rr.log("views/top", rr.Image(np.ascontiguousarray(top)).compress(jpeg_quality=85))
-    if args.raw_range:
-        from fod.colormaps import colorize_range
-        from fod.range_image import build_range_image
-
-        img = colorize_range(build_range_image(cloud).range, 80.0)[:, :, ::-1]
-        rr.log("views/range", rr.Image(np.ascontiguousarray(img)).compress(jpeg_quality=85))
+    if args.anomaly:
+        rr.log("views/anomaly", rr.Image(anomaly_image(res, cloud, detector)).compress(jpeg_quality=85))
 
     # --- показатели ------------------------------------------------------------------
     rr.log("metrics/speed/actual", rr.Scalar(tel.speed_kmh))
@@ -344,7 +399,8 @@ def main() -> int:
     parser.add_argument("--stride", type=int, default=1, help="Показывать каждый N-й кадр (тракт считает все).")
     parser.add_argument("--points", type=int, default=100_000, help="Не больше стольких точек облака на кадр в 3D.")
     parser.add_argument("--voxel", type=float, default=0.1, help="Прореживание облака в 3D, м (0 — нет).")
-    parser.add_argument("--no-raw-range", dest="raw_range", action="store_false", help="Без развёртки дальности 360°.")
+    parser.add_argument("--no-anomaly", "--no-raw-range", dest="anomaly", action="store_false",
+                        help="Без карты аномальности (выше нормы полотна, внутри габарита).")
     parser.add_argument("--colors", default="intensity,height,range,gauge",
                         help="Раскраски облака в 3D через запятую, первая видна сразу: " + "; ".join(f"{k} — {v}" for k, v in COLOR_MODES.items()))
     parser.add_argument("--device", default="cuda")
