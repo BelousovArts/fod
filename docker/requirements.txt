@@ -1,0 +1,9 @@
+# Зависимости в контейнере (ROS 2 Humble, Python 3.10). torch ставится отдельно, под CUDA 12.8.
+# numpy < 2: сообщения ROS Humble собраны под numpy 1.x.
+numpy==1.26.4
+scipy==1.13.1
+opencv-python-headless==4.10.0.84
+small_gicp>=1.0,<1.1
+PyYAML>=6.0
+# rerun 0.22 — последняя версия, которой хватает numpy 1.x (с 0.23 нужен numpy 2).
+rerun-sdk==0.22.1

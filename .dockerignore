@@ -1,0 +1,15 @@
+# В образ — только решение: данные, out/ и .venv весят десятки ГБ.
+*
+!docker/
+!fod/
+!fod_ros/
+!models/
+!config/fod.rviz
+!config/train.yaml
+!config/stand_example.yaml
+!scripts/obstacle_bench.py
+!scripts/make_video.py
+!scripts/rerun_bag.py
+!scripts/make_map.py
+!scripts/stand.py
+**/__pycache__

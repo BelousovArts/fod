@@ -1,0 +1,31 @@
+# Детектор на поезде как служба: поднимается при загрузке, перезапускается при сбое.
+#   docker compose up -d --build        # собрать образ и запустить
+#   docker compose logs -f fod          # журнал (хранится 5 × 50 МБ)
+#   docker compose down                 # остановить
+# Параметры (топик, установка лидара) — config/train.yaml, после правки: docker compose restart fod.
+# ROS_DOMAIN_ID — как у драйвера лидара: ROS_DOMAIN_ID=5 docker compose up -d.
+services:
+  fod:
+    image: fod
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: fod
+    # Сеть и разделяемая память хоста: DDS видит драйвер лидара, большие облака идут без копий.
+    # Тот же uid, что у драйвера лидара (иначе общая память DDS недоступна). 0 — если драйвер от root.
+    user: "${FOD_UID:-0}:${FOD_GID:-0}"
+    network_mode: host
+    ipc: host
+    restart: always
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./config/train.yaml:/fod/config/train.yaml:ro
+    command: ["python3", "-m", "fod_ros.node", "--ros-args", "--params-file", "/fod/config/train.yaml"]
+    gpus: all
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
