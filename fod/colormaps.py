@@ -9,6 +9,8 @@ NO_DATA = (18, 18, 18)
 
 
 def colorize_range(rng: np.ndarray, vmax: float) -> np.ndarray:
+    if rng.size == 0:
+        return np.zeros(rng.shape + (3,), np.uint8)
     t = np.zeros(rng.shape, dtype=np.float32)
     ok = np.isfinite(rng) & (rng > 0)
     t[ok] = np.clip(np.log1p(rng[ok]) / np.log1p(vmax), 0.0, 1.0)
@@ -26,6 +28,9 @@ def colorize_intensity(intensity: np.ndarray, vmax: float = 80.0, gamma: float =
     кадру и сравнивать участки нельзя. Медиана в тоннеле 5…15, отсюда vmax = 80 и
     гамма 0.6: тёмный низ различим, яркие отражатели честно уходят в насыщение.
     """
+    if intensity.size == 0:
+        # cv2.applyColorMap на пустом массиве падает по SIGFPE.
+        return np.zeros(intensity.shape + (3,), np.uint8)
     t = np.zeros(intensity.shape, dtype=np.float32)
     ok = np.isfinite(intensity)
     t[ok] = np.clip(intensity[ok] / max(vmax, 1.0), 0.0, 1.0) ** gamma
