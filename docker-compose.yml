@@ -10,7 +10,6 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-      target: fod
     # Сеть и разделяемая память хоста: DDS видит драйвер лидара, большие облака идут без копий.
     # Тот же uid, что у драйвера лидара (иначе общая память DDS недоступна). 0 — если драйвер от root.
     user: "${FOD_UID:-0}:${FOD_GID:-0}"

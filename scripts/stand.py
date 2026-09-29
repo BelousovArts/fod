@@ -31,7 +31,7 @@ def main() -> int:
     from fod.mount import add_mount_args, mount_from_args
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("bag", help="Папка записи, файл .db3/.mcap или имя записи в FOD_DATA.")
+    parser.add_argument("bag", nargs="?", help="Папка записи, файл .db3/.mcap или имя записи в FOD_DATA.")
     parser.add_argument("--scenario", help="YAML со списком объектов.")
     parser.add_argument("--object", action="append", default=[], metavar="ТИП@М",
                         help="Объект за столько метров впереди, повторять после проезда (можно несколько).")
@@ -54,6 +54,8 @@ def main() -> int:
             print(f"  {k:14s} {v['kind']:4s} {'x'.join(f'{x:g}' for x in v['size'])} м, от оси {v['n']:+.2f} м "
                   f"({'на полу' if v['rest'] == 'floor' else f'над головками {v.get(chr(117), 0):.2f} м'})")
         return 0
+    if not args.bag:
+        parser.error("нужен бэг (или --list)")
 
     from fod.bags import bag_time_range, iter_pointclouds, read_bag_topic, resolve_bag
     from fod.pipeline import Pipeline

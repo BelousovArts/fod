@@ -1,31 +1,36 @@
 #!/usr/bin/env bash
-# Прогнать запись ROS 2 через решение в контейнере; результат в results/<имя записи>/.
+# Прогнать бэг через детектор; результат — в results/<имя бэга>/.
 #
-#   ./run_bag.sh /путь/к/записи             # detections.csv, obstacles.csv, summary.json
-#   ./run_bag.sh /путь/к/записи --video     # плюс video.mp4
-#   ./run_bag.sh /путь/к/записи --until 60  # только первые 60 с
+#   ./run_bag.sh /путь/к/бэгу               # video.mp4, detections.csv, obstacles.csv, summary.json
+#   ./run_bag.sh /путь/к/бэгу --no-video    # без видео (быстрее)
+#   ./run_bag.sh /путь/к/бэгу --until 60    # только первые 60 секунд
 #
-# Запись — папка с metadata.yaml или файл .db3 / .mcap внутри неё.
-# FOD_RESULTS — куда писать (по умолчанию ./results), FOD_IMAGE — образ (fod),
-# FOD_NO_DOCKER=1 — без контейнера, в текущем окружении с ROS 2 и зависимостями.
+# Бэг — папка с metadata.yaml (или файл .db3 / .mcap внутри неё).
+# FOD_RESULTS — куда писать (по умолчанию ./results), FOD_NO_DOCKER=1 — без контейнера.
 set -euo pipefail
+HERE=$(dirname "$(realpath "$0")")
+source "$HERE/docker/common.sh"
 
-if [ $# -lt 1 ]; then
-    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+if [ $# -lt 1 ] || [ "$1" = -h ] || [ "$1" = --help ]; then
+    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
-BAG=$(realpath "$1")
+resolve_bag "$1"
 shift
-[ -f "$BAG" ] && BAG=$(dirname "$BAG")
-[ -f "$BAG/metadata.yaml" ] || { echo "Нет $BAG/metadata.yaml — это не запись ROS 2." >&2; exit 1; }
-NAME=$(basename "$BAG")
 OUT=$(realpath -m "${FOD_RESULTS:-$PWD/results}")
 mkdir -p "$OUT"
 
+ARGS=() VIDEO=(--video)
+for a in "$@"; do
+    if [ "$a" = --no-video ]; then VIDEO=(); else ARGS+=("$a"); fi
+done
+ARGS+=("${VIDEO[@]}")
+
 if [ -n "${FOD_NO_DOCKER:-}" ]; then
-    cd "$(dirname "$(realpath "$0")")"
-    exec python3 -m fod_ros.run_bag "$BAG" --out "$OUT" "$@"
+    cd "$HERE"
+    exec python3 -m fod_ros.run_bag "$BAG" --out "$OUT" "${ARGS[@]}"
 fi
-exec docker run --rm --gpus all -u "$(id -u):$(id -g)" \
+ensure_image
+exec docker run --rm --gpus all "${USER_FLAGS[@]}" \
     -v "$BAG:/data/$NAME:ro" -v "$OUT:/results" \
-    "${FOD_IMAGE:-fod}" python3 -m fod_ros.run_bag "/data/$NAME" --out /results "$@"
+    "$IMAGE" python3 -m fod_ros.run_bag "/data/$NAME" --out /results "${ARGS[@]}"

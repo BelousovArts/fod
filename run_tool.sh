@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# Инструменты по записи в контейнере; результат в results/<имя записи>/.
+# Инструменты по бэгу; результат — в results/<имя бэга>/.
 #
-#   ./run_tool.sh video /путь/к/записи [--start 20 --until 80]    # video.mp4 + CSV
-#   ./run_tool.sh rerun /путь/к/записи [--until 60]                # rerun.rrd → rerun results/<запись>/rerun.rrd
-#   ./run_tool.sh map   /путь/к/записи [--voxel 0.1]               # map/map.ply, map.pcd, map_top.png, tiles/
-#   ./run_tool.sh stand /путь/к/записи --object person@80 [--video]
-#   ./run_tool.sh stand /путь/к/записи --scenario мой_сценарий.yaml
-#   ./run_tool.sh stand --list                                     # типы объектов
+#   ./run_tool.sh rerun /путь/к/бэгу             # 3D-просмотр в браузере: http://localhost:9090
+#   ./run_tool.sh video /путь/к/бэгу             # только видео (то же, что run_bag.sh)
+#   ./run_tool.sh map   /путь/к/бэгу             # карта: облако map.ply, вид сверху, плитки по 100 м
+#   ./run_tool.sh stand /путь/к/бэгу --object person@80 --video   # вставить объект и проверить детектор
+#   ./run_tool.sh stand /путь/к/бэгу --scenario мой_сценарий.yaml
+#   ./run_tool.sh stand --list                   # какие объекты можно вставить
 #
-# У всех: --forward/--up/--rpy — установка лидара (по умолчанию как в записях хакатона).
-# FOD_RESULTS — куда писать (./results), FOD_IMAGE — образ (fod), FOD_NO_DOCKER=1 — без контейнера.
+# Общие ключи: --start 20 --until 80 (кусок бэга, секунды); rerun --save файл.rrd — в файл вместо браузера.
+# FOD_RESULTS — куда писать (./results), FOD_NO_DOCKER=1 — без контейнера.
 set -euo pipefail
 HERE=$(dirname "$(realpath "$0")")
+source "$HERE/docker/common.sh"
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 [ $# -ge 1 ] || usage
 case "$1" in
     video) SCRIPT=scripts/make_video.py ;;
@@ -27,26 +28,34 @@ shift
 OUT=$(realpath -m "${FOD_RESULTS:-$PWD/results}")
 mkdir -p "$OUT"
 
-if [ "$TOOL" = stand ] && [ "${1:-}" = --list ]; then
-    BAG="" NAME=""
-else
+BAG="" NAME=""
+if ! { [ "$TOOL" = stand ] && [ "${1:-}" = --list ]; }; then
     [ $# -ge 1 ] || usage
-    BAG=$(realpath "$1")
+    resolve_bag "$1"
     shift
-    [ -f "$BAG" ] && BAG=$(dirname "$BAG")
-    [ -f "$BAG/metadata.yaml" ] || { echo "Нет $BAG/metadata.yaml — это не запись ROS 2." >&2; exit 1; }
-    NAME=$(basename "$BAG")
 fi
+
+# rerun без --save — в браузер.
+WEB=""
+if [ "$TOOL" = rerun ] && [[ " $* " != *" --save "* ]]; then
+    WEB=1
+fi
+WEB_URL="http://localhost:9090/?url=ws://localhost:9877"
+SAVE_NAME=""
 
 if [ -n "${FOD_NO_DOCKER:-}" ]; then
     cd "$HERE"
-    ARGS=(${BAG:+"$BAG"} --out "$OUT" "$@")
-    [ "$TOOL" = rerun ] && [[ " $* " != *" --save "* ]] && ARGS+=(--save "$OUT/$NAME/rerun.rrd")
-    [ "$TOOL" = stand ] && [ -z "$BAG" ] && ARGS=("$@")
+    ARGS=()
+    [ -n "$BAG" ] && ARGS+=("$BAG")
+    [ "$TOOL" = rerun ] || { [ -n "$BAG" ] && ARGS+=(--out "$OUT"); }
+    ARGS+=("$@")
+    [ -n "$WEB" ] && { ARGS+=(--web); open_when_ready "$WEB_URL" 9090; }
     exec python3 "$SCRIPT" "${ARGS[@]}"
 fi
 
-RUN=(docker run --rm --gpus all -u "$(id -u):$(id -g)" -v "$OUT:/results")
+ensure_image
+RUN=(docker run --rm --init --gpus all "${USER_FLAGS[@]}" -v "$OUT:/results")
+[ -t 0 ] && RUN+=(-it)
 [ -n "$BAG" ] && RUN+=(-v "$BAG:/data/$NAME:ro")
 ARGS=()
 while [ $# -gt 0 ]; do
@@ -57,12 +66,23 @@ while [ $# -gt 0 ]; do
             RUN+=(-v "$SC:/scenario/$(basename "$SC"):ro")
             ARGS+=(--scenario "/scenario/$(basename "$SC")")
             shift 2 ;;
-        --save) ARGS+=(--save "/results/$NAME/$(basename "$2")"); shift 2 ;;
+        --save) SAVE_NAME=$(basename "$2"); ARGS+=(--save "/results/$NAME/$SAVE_NAME"); shift 2 ;;
         *) ARGS+=("$1"); shift ;;
     esac
 done
 if [ -z "$BAG" ]; then
-    exec "${RUN[@]}" "${FOD_IMAGE:-fod}" python3 "$SCRIPT" "${ARGS[@]}"
+    exec "${RUN[@]}" "$IMAGE" python3 "$SCRIPT" "${ARGS[@]}"
 fi
-[ "$TOOL" = rerun ] && [[ " ${ARGS[*]} " != *" --save "* ]] && ARGS+=(--save "/results/$NAME/rerun.rrd")
-exec "${RUN[@]}" "${FOD_IMAGE:-fod}" python3 "$SCRIPT" "/data/$NAME" --out /results "${ARGS[@]}"
+if [ -n "$WEB" ]; then
+    RUN+=(-p 9090:9090 -p 9877:9877)
+    ARGS+=(--web)
+    echo "Просмотр откроется в браузере: $WEB_URL (Ctrl+C — закончить)"
+    open_when_ready "$WEB_URL" 9090
+    exec "${RUN[@]}" "$IMAGE" python3 "$SCRIPT" "/data/$NAME" "${ARGS[@]}"
+fi
+if [ "$TOOL" = rerun ]; then
+    "${RUN[@]}" "$IMAGE" python3 "$SCRIPT" "/data/$NAME" "${ARGS[@]}"
+    echo "Файл: $OUT/$NAME/$SAVE_NAME (открыть: rerun $OUT/$NAME/$SAVE_NAME, нужен pip install rerun-sdk==0.22.1)"
+    exit 0
+fi
+exec "${RUN[@]}" "$IMAGE" python3 "$SCRIPT" "/data/$NAME" --out /results "${ARGS[@]}"

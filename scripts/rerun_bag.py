@@ -16,6 +16,7 @@
 
   python3 scripts/rerun_bag.py roundT_doubleT                  # открыть окно rerun
   python3 scripts/rerun_bag.py doubleT_obstacle --save run.rrd # в файл: rerun run.rrd
+  python3 scripts/rerun_bag.py roundT_doubleT --web            # в браузере: http://localhost:9090
   python3 scripts/rerun_bag.py /путь/к/записи --start 30 --until 90 --stride 2
 """
 
@@ -54,6 +55,10 @@ def palette() -> dict:
         "UNKNOWN": (150, 150, 150), "CLEAR": rgb(ov.COL_AXIS), "ATTENTION": rgb(ov.COL_SUSPECT),
         "OBSTACLE": rgb(ov.COL_CONFIRMED),
     }
+
+
+WEB_PORT, WS_PORT = 9090, 9877
+WEB_URL = f"http://localhost:{WEB_PORT}/?url=ws://localhost:{WS_PORT}"
 
 
 def blueprint(colors: list[str]):
@@ -393,6 +398,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("bag", help="Папка записи, файл .db3/.mcap или имя записи в FOD_DATA.")
     parser.add_argument("--save", type=Path, help="Писать в файл .rrd вместо окна.")
+    parser.add_argument("--web", action="store_true",
+                        help="Показывать в браузере (http://localhost:9090) вместо окна; после прогона ждать Ctrl+C.")
     parser.add_argument("--topic", help="Топик облака; по умолчанию первый PointCloud2.")
     parser.add_argument("--start", type=float, help="С какой секунды записи.")
     parser.add_argument("--until", type=float, help="До какой секунды записи.")
@@ -424,7 +431,10 @@ def main() -> int:
     begin = t0 + int(args.start * 1e9) if args.start else None
     stop = t0 + int(args.until * 1e9) if args.until else None
 
-    rr.init(f"fod {bag_dir.name}", spawn=args.save is None)
+    rr.init(f"fod {bag_dir.name}", spawn=args.save is None and not args.web)
+    if args.web:
+        rr.serve_web(open_browser=False, web_port=WEB_PORT, ws_port=WS_PORT, server_memory_limit="50%")
+        print(f"Просмотр в браузере: {WEB_URL}", flush=True)
     if args.save is not None:
         args.save.parent.mkdir(parents=True, exist_ok=True)
         rr.save(args.save)
@@ -453,6 +463,15 @@ def main() -> int:
             print(f"  кадр {res.index}: {tel.level}", flush=True)
     flush_map(state)
     print(f"Готово: {n} кадров" + (f", файл {args.save} (открыть: rerun {args.save})" if args.save else ""))
+    if args.web:
+        import time
+
+        print(f"Просмотр в браузере: {WEB_URL} — Ctrl+C, чтобы закончить", flush=True)
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
     return 0
 
 

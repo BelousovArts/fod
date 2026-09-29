@@ -1,0 +1,8 @@
+# Скрипты и конфиги — всегда с LF, иначе на Windows (core.autocrlf) bash и Docker ломаются на \r.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary
+*.pptx binary
+*.pt binary
+*.mp4 binary
